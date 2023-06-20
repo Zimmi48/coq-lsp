@@ -46,6 +46,18 @@ end = struct
     CWarnings.set_flags (warn ^ to_string w)
 end
 
+module Module : sig
+  type t
+
+  val make : string -> t
+end = struct
+  type t = string
+
+  (* XXX: A lot more work needs to happen here, in particular we must understand
+     -Q -R flags and loadpath bindings *)
+  let make x = x
+end
+
 type t =
   { coqlib : string
   ; coqcorelib : string
@@ -56,6 +68,7 @@ type t =
       (string * string option * Vernacexpr.export_with_cats option) list
   ; flags : Flags.t
   ; warnings : Warning.t list
+  ; modules : Module.t list
   ; kind : string
   ; debug : bool
   }
@@ -105,7 +118,7 @@ module CmdLine = struct
     }
 end
 
-let make ~cmdline ~implicit ~kind ~debug =
+let make ~cmdline ~implicit ~kind ~debug ~modules =
   let { CmdLine.coqcorelib
       ; coqlib
       ; ocamlpath
@@ -147,6 +160,7 @@ let make ~cmdline ~implicit ~kind ~debug =
   ; require_libs
   ; flags
   ; warnings
+  ; modules
   ; kind
   ; debug
   }
@@ -157,10 +171,25 @@ let pp_load_path fmt
     (Names.DirPath.to_string coq_path)
     unix_path
 
-let describe { coqlib; kind; vo_load_path; ml_include_path; require_libs; _ } =
+let describe ws =
+  let { coqlib
+      ; coqcorelib = _
+      ; ocamlpath = _
+      ; vo_load_path
+      ; ml_include_path
+      ; require_libs
+      ; flags = _
+      ; warnings = _
+      ; modules
+      ; kind
+      ; debug = _
+      } =
+    ws
+  in
   let require_msg =
     String.concat " " (List.map (fun (s, _, _) -> s) require_libs)
   in
+  let n_mod = List.length modules in
   let n_vo = List.length vo_load_path in
   let n_ml = List.length ml_include_path in
   let extra =
@@ -174,9 +203,10 @@ let describe { coqlib; kind; vo_load_path; ml_include_path; require_libs; _ } =
       "@[Configuration loaded from %s@\n\
       \ - coqlib is at: %s@\n\
       \ - Modules [%s] will be loaded by default@\n\
+      \ - %d Coq modules (.v files) known@\n\
       \ - %d Coq path directory bindings in scope; %d Coq plugin directory \
        bindings in scope@]"
-      kind coqlib require_msg n_vo n_ml
+      kind coqlib require_msg n_mod n_vo n_ml
   , extra )
 
 (* Require a set of libraries *)
@@ -231,6 +261,7 @@ let apply ~uri
     ; require_libs
     ; flags
     ; warnings
+    ; modules = _
     ; kind = _
     ; debug
     } =
@@ -242,6 +273,11 @@ let apply ~uri
   List.iter Loadpath.add_vo_path vo_load_path;
   Declaremods.start_library (dirpath_of_uri ~uri);
   load_objs require_libs
+
+let module_from_coqproject { CoqProject_file.thing = file; _ } =
+  match Filename.extension file with
+  | ".v" -> Some (Module.make file)
+  | _ -> None
 
 let workspace_from_coqproject ~cmdline ~debug cp_file : t =
   (* Io.Log.error "init" "Parsing _CoqProject"; *)
@@ -258,7 +294,7 @@ let workspace_from_coqproject ~cmdline ~debug cp_file : t =
     ; coq_path = Libnames.dirpath_of_string coq_path
     }
   in
-  let { r_includes; q_includes; ml_includes; extra_args; _ } =
+  let { r_includes; q_includes; ml_includes; extra_args; files; _ } =
     read_project_file ~warning_fn:(fun _ -> ()) cp_file
   in
   let ml_include_path = List.map (fun f -> f.thing.path) ml_includes in
@@ -276,9 +312,10 @@ let workspace_from_coqproject ~cmdline ~debug cp_file : t =
       ; ml_include_path = cmdline.ml_include_path @ ml_include_path
       }
   in
+  let modules = List.filter_map module_from_coqproject files in
   let implicit = true in
   let kind = cp_file in
-  make ~cmdline ~implicit ~kind ~debug
+  make ~cmdline ~implicit ~kind ~debug ~modules
 
 let workspace_from_cmdline ~debug ~cmdline =
   let kind = "Command-line arguments" in
@@ -289,4 +326,4 @@ let guess ~debug ~cmdline ~dir =
   let cp_file = Filename.concat dir "_CoqProject" in
   if Sys.file_exists cp_file then
     workspace_from_coqproject ~cmdline ~debug cp_file
-  else workspace_from_cmdline ~debug ~cmdline
+  else workspace_from_cmdline ~debug ~cmdline ~modules:[]

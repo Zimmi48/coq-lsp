@@ -24,9 +24,10 @@ end
 
 module Warning : sig
   type t
+end
 
-  val make : string -> t
-  val apply : t -> unit
+module Module : sig
+  type t
 end
 
 type t = private
@@ -39,6 +40,7 @@ type t = private
       (string * string option * Vernacexpr.export_with_cats option) list
   ; flags : Flags.t
   ; warnings : Warning.t list
+  ; modules : Module.t list
   ; kind : string  (** How the workspace was built *)
   ; debug : bool  (** Enable backtraces *)
   }
