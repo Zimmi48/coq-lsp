@@ -72,8 +72,15 @@ let lsp_cb ofn =
           Lsp.JFleche.mk_progress ~uri ~version progress |> ofn)
     }
 
+let load_module m =
+  Feedback.msg_warning
+    Pp.(
+      str "[coq_lsp] load_module was called for "
+      ++ str m
+      ++ str ". This should not happen!");
+  Dynlink.loadfile m
+
 let coq_init ~debug =
-  let load_module = Dynlink.loadfile in
   let load_plugin = Coq.Loader.plugin_handler None in
   Coq.Init.(coq_init { debug; load_module; load_plugin })
 

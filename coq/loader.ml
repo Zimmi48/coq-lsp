@@ -77,10 +77,11 @@ let safe_loader loader fl_pkg =
     ()
 
 let plugin_handler user_loader =
-  let loader = Option.default (Fl_dynload.load_packages ~debug:false) user_loader in
+  let loader = Option.default (Fl_dynload.load_packages ~debug:true) user_loader in
   let safe_loader = safe_loader loader in
   fun fl_pkg ->
     let _, fl_pkg = Mltop.PluginSpec.repr fl_pkg in
+    Feedback.msg_warning Pp.(str "Coq.Loader.plugin_handler: " ++ str fl_pkg);
     match map_serlib fl_pkg with
     | Some serlib_pkg ->
       safe_loader serlib_pkg
