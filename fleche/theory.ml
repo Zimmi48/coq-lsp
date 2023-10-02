@@ -124,7 +124,8 @@ module Handle = struct
       in
       let handle = { handle with pt_requests = delayed } in
       (handle, pt_ids fullfilled)
-    | Failed _ | FailedPermanent _ -> (handle, Int.Set.empty)
+    | WorkspaceUpdated _ | Failed _ | FailedPermanent _ ->
+      (handle, Int.Set.empty)
 
   (* trigger pending incremental requests *)
   let update_doc_info ~handle ~(doc : Doc.t) =
@@ -232,8 +233,7 @@ let send_error_permanent_fail ~io ~uri ~version message =
   let d = Lang.Diagnostic.{ range; severity = 1; message; extra = None } in
   Io.Report.diagnostics ~io ~uri ~version [ d ]
 
-let create ~io ~root_state ~workspace ~uri ~raw ~version =
-  let r = Doc.create ~state:root_state ~workspace ~uri ~raw ~version in
+let handle_create ~io ~uri ~version (r : (_, _) Coq.Protect.R.t) =
   match r with
   | Completed (Result.Ok doc) ->
     Handle.create ~uri ~doc;
@@ -249,6 +249,10 @@ let create ~io ~root_state ~workspace ~uri ~raw ~version =
     Io.Report.message ~io ~lvl:1 ~message;
     send_error_permanent_fail ~io ~uri ~version (Pp.str message)
   | Interrupted -> ()
+
+let create ~io ~root_state ~workspace ~uri ~raw ~version =
+  let r = Doc.create ~state:root_state ~workspace ~uri ~raw ~version in
+  handle_create ~io ~uri ~version r
 
 (* Set this to false for < 8.17, we could parse the version but not worth it. *)
 let sane_coq_base_version = true
@@ -276,7 +280,10 @@ let create ~io ~root_state ~workspace ~uri ~raw ~version =
        instructions on how to install a fixed branch for earlier Coq versions."
     in
     Io.Report.message ~io ~lvl:1 ~message;
-    (match Doc.create_failed_permanent ~state:root_state ~uri ~raw ~version with
+    (match
+       Doc.create_failed_permanent ~state:root_state ~workspace ~uri ~raw
+         ~version
+     with
     | Contents.R.Error _e -> ()
     | Ok doc -> Handle.create ~uri ~doc);
     send_error_permanent_fail ~io ~uri ~version (Pp.str message))
@@ -295,12 +302,18 @@ let change ~io ~(doc : Doc.t) ~version ~raw =
     let message = Pp.(str "Error in document conversion: " ++ str e) in
     send_error_permanent_fail ~io ~uri ~version message;
     Handle.clear_requests ~uri
-  | Contents.R.Ok doc ->
+  | Contents.R.Ok (Coq.Protect.R.Completed (Ok doc)) ->
     let diff = Unix.gettimeofday () -. tb in
     Io.Log.trace "bump file took" (Format.asprintf "%f" diff);
     let invalid_reqs = Handle.update_doc_version ~doc in
     Check.schedule ~uri;
     invalid_reqs
+  | Contents.R.Ok (Coq.Protect.R.Completed (Error (Anomaly (_, msg))))
+  | Contents.R.Ok (Coq.Protect.R.Completed (Error (User (_, msg)))) ->
+    let message = Pp.(str "Error in document update: " ++ msg) in
+    send_error_permanent_fail ~io ~uri ~version message;
+    Handle.clear_requests ~uri
+  | Contents.R.Ok Coq.Protect.R.Interrupted -> Int.Set.empty
 
 let change ~io ~uri ~version ~raw =
   match Handle.find_opt ~uri with
@@ -356,6 +369,7 @@ module Request = struct
       | Yes _ -> true
       | Failed range | FailedPermanent range | Stopped range ->
         Doc.Target.reached ~range (line, col)
+      | WorkspaceUpdated _ -> false
     in
     let in_range =
       match version with

@@ -53,6 +53,9 @@ module Completion : sig
   type t = private
     | Yes of Lang.Range.t  (** Location of the last token in the document *)
     | Stopped of Lang.Range.t  (** Location of the last valid token *)
+    | WorkspaceUpdated of Lang.Range.t
+        (** The Workspace Environment was updated, document may need full
+            restart *)
     | Failed of Lang.Range.t  (** Critical failure, like an anomaly *)
     | FailedPermanent of Lang.Range.t
         (** Temporal Coq hack, avoids any computation *)
@@ -72,6 +75,11 @@ type t = private
   ; nodes : Node.t list
   ; diags_dirty : bool
   ; completed : Completion.t
+        (** Required when the workspace was updated, will be replaced by a
+            pointer to a particular theory later on so the ownership is more
+            explicit *)
+  ; init : Coq.State.t
+  ; workspace : Coq.Workspace.t
   }
 
 (** Return the list of all asts in the doc *)
@@ -90,8 +98,14 @@ val create :
   -> (t, Loc.t) Coq.Protect.R.t
 
 (** Update the contents of a document, updating the right structures for
-    incremental checking. *)
-val bump_version : version:int -> raw:string -> t -> t Contents.R.t
+    incremental checking. If the workspace changed a full re-init of the
+    document may be needed. *)
+val bump_version :
+  version:int -> raw:string -> t -> (t, Loc.t) Coq.Protect.R.t Contents.R.t
+
+(** Notifiy the document the workspace / environment has changed, for now it
+    will create a new initial state. *)
+val update_workspace : doc:t -> workspace:Coq.Workspace.t -> t
 
 (** Checking targets, this specifies what we expect check to reach *)
 module Target : sig
@@ -116,6 +130,7 @@ val save : doc:t -> (unit, Loc.t) Coq.Protect.E.t
 (** This is internal, to workaround the Coq multiple-docs problem *)
 val create_failed_permanent :
      state:Coq.State.t
+  -> workspace:Coq.Workspace.t
   -> uri:Lang.LUri.File.t
   -> version:int
   -> raw:string

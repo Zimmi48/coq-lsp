@@ -185,16 +185,22 @@ module Completion = struct
   type t =
     | Yes of Lang.Range.t  (** Location of the last token in the document *)
     | Stopped of Lang.Range.t  (** Location of the last valid token *)
+    | WorkspaceUpdated of Lang.Range.t  (** Location of the last valid token *)
     | Failed of Lang.Range.t  (** Critical failure, like an anomaly *)
     | FailedPermanent of Lang.Range.t
         (** Temporal Coq hack, avoids any computation *)
 
   let range = function
-    | Yes range | Stopped range | Failed range | FailedPermanent range -> range
+    | Yes range
+    | Stopped range
+    | WorkspaceUpdated range
+    | Failed range
+    | FailedPermanent range -> range
 
   let to_string = function
     | Yes _ -> "fully checked"
     | Stopped _ -> "stopped"
+    | WorkspaceUpdated _ -> "workspace was updated"
     | Failed _ -> "failed"
     | FailedPermanent _ -> "refused to create due to Coq parsing bug"
 
@@ -214,7 +220,9 @@ type t =
   ; root : Coq.State.t
   ; nodes : Node.t list
   ; diags_dirty : bool  (** Used to optimize `eager_diagnostics` *)
-  ; completed : Completion.t
+  ; completed : Completion.t  (** Required when the workspace was updated *)
+  ; init : Coq.State.t
+  ; workspace : Coq.Workspace.t
   }
 
 (* Flatten the list of document asts *)
@@ -270,7 +278,7 @@ let process_init_feedback ~stats range state messages =
 (* Memoized call to [Coq.Init.doc_init] *)
 let mk_doc root_state workspace uri = Memo.Init.eval (root_state, workspace, uri)
 
-let create ~state ~workspace ~uri ~version ~contents =
+let create_doc ~state ~workspace ~uri ~version ~contents =
   let () = Stats.reset () in
   let { Coq.Protect.E.r; feedback } = mk_doc state workspace uri in
   Coq.Protect.R.map r ~f:(fun root ->
@@ -292,14 +300,16 @@ let create ~state ~workspace ~uri ~version ~contents =
       ; nodes
       ; diags_dirty
       ; completed = Stopped init_range
+      ; init = state
+      ; workspace
       })
 
 let create ~state ~workspace ~uri ~version ~raw =
   match Contents.make ~uri ~raw with
   | Error e -> Coq.Protect.R.error (Pp.str e)
-  | Ok contents -> create ~state ~workspace ~uri ~version ~contents
+  | Ok contents -> create_doc ~state ~workspace ~uri ~version ~contents
 
-let create_failed_permanent ~state ~uri ~version ~raw =
+let create_failed_permanent ~state ~workspace ~uri ~version ~raw =
   Contents.make ~uri ~raw
   |> Contents.R.map ~f:(fun contents ->
          let lines = contents.Contents.lines in
@@ -313,6 +323,8 @@ let create_failed_permanent ~state ~uri ~version ~raw =
          ; nodes = []
          ; diags_dirty = true
          ; completed = FailedPermanent range
+         ; init = state
+         ; workspace
          })
 
 let recover_up_to_offset ~init_range doc offset =
@@ -353,6 +365,8 @@ let bump_version ~init_range ~version ~contents doc =
   (* Important: uri, root remain the same *)
   let uri = doc.uri in
   let root = doc.root in
+  let init = doc.init in
+  let workspace = doc.workspace in
   { uri
   ; version
   ; root
@@ -361,6 +375,8 @@ let bump_version ~init_range ~version ~contents doc =
   ; toc
   ; diags_dirty = true (* EJGA: Is it worth to optimize this? *)
   ; completed
+  ; init
+  ; workspace
   }
 
 let bump_version ~version ~(contents : Contents.t) doc =
@@ -369,22 +385,31 @@ let bump_version ~version ~(contents : Contents.t) doc =
   match doc.completed with
   (* We can do better, but we need to handle the case where the anomaly is when
      restoring / executing the first sentence *)
-  | FailedPermanent _ -> doc
+  | FailedPermanent _ -> Coq.Protect.R.ok doc
   | Failed _ ->
-    { doc with
-      version
-    ; nodes = []
-    ; contents
-    ; diags_dirty = true
-    ; completed = Stopped init_range
-    }
-  | Stopped _ | Yes _ -> bump_version ~init_range ~version ~contents doc
+    Coq.Protect.R.ok
+      { doc with
+        version
+      ; nodes = []
+      ; contents
+      ; diags_dirty = true
+      ; completed = Stopped init_range
+      }
+  | WorkspaceUpdated _ ->
+    let state, workspace, uri = (doc.init, doc.workspace, doc.uri) in
+    create_doc ~state ~workspace ~uri ~version ~contents
+  | Stopped _ | Yes _ ->
+    bump_version ~init_range ~version ~contents doc |> Coq.Protect.R.ok
 
 let bump_version ~version ~raw doc =
   let contents = Contents.make ~uri:doc.uri ~raw in
   Contents.R.map
     ~f:(fun contents -> bump_version ~version ~contents doc)
     contents
+
+let update_workspace ~doc ~workspace =
+  let range = Completion.range doc.completed in
+  { doc with completed = WorkspaceUpdated range; workspace }
 
 let add_node ~node doc =
   let diags_dirty = if node.Node.diags <> [] then true else doc.diags_dirty in
@@ -846,6 +871,10 @@ let check ~io ~target ~doc () =
   | FailedPermanent _ | Failed _ ->
     Io.Log.trace "check" "can't resume, failed=yes, nothing to do";
     doc
+  | WorkspaceUpdated _ ->
+    Io.Log.trace "check" "resuming, full workspace update";
+    let state, workspace, uri = (doc.init, doc.workspace, doc.uri) in
+    create_doc ~state ~workspace ~uri ~version ~contents
   | Stopped last_tok ->
     DDebug.resume last_tok doc.version;
     let doc = resume_check ~io ~last_tok ~doc ~target in
